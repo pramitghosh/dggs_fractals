@@ -1,0 +1,449 @@
+---
+title: "Measuring Fractal Dimension using Discrete Global Grid Systems"
+date: today
+date-format: long
+author: "Pramit Ghosh"
+toc: true
+format: html
+editor: visual
+---
+
+
+## Calculate Fractal Dimensions using DGGS
+
+```{r}
+library(dggridR)
+library(sf)
+library(sfheaders)
+library(h3)
+
+find_diam = function(ind_cover)
+{
+  ind_cover |>
+    st_sfc() |>
+    st_sf(crs = "EPSG:4326") |>
+    sf_cast("POINT") |>
+    st_distance() |>
+    max()
+}
+
+dggs_coverage = function(res, feature, plot = FALSE, addplot = TRUE, DGGStype = "DGGRID", bordercolour = "coral", DGGStopology = "TRIANGLE", DGGSaperture = 4, ortho_lat = 30, ortho_long = -10, ...)
+{
+  print(paste("Checking resolution:", res))
+  ft_bbox = st_sf(st_as_sfc(st_bbox(feature)))
+  
+  if(DGGStype == "DGGRID")
+  {
+    #Generate a dggs
+  dggs = dgconstruct(res=res, metric=TRUE, resround='nearest', topology = DGGStopology, aperture = DGGSaperture, pole_lat_deg = 90, pole_lon_deg = 0, ...)
+  ft_grid = dgshptogrid(dggs, ft_bbox)
+  } else if(DGGStype == "H3")
+  {
+    ft_bbox = st_buffer(ft_bbox, edge_length(res, 'm')) |>
+      st_bbox() |>
+      st_as_sfc() |>
+      st_sf()
+    ft_grid = polyfill(ft_bbox, res) |>
+      h3_to_geo_boundary_sf()
+  }
+
+  whether_intersects = st_intersects(ft_grid, feature)
+  int_grid_cells = ft_grid[which(lapply(whether_intersects, length) > 0),]
+  print(paste("Intersection ratio: ", nrow(int_grid_cells), "/", nrow(ft_grid), " = ", nrow(int_grid_cells)/nrow(ft_grid), sep = ""))
+  
+  int_grid_cells_mpt = st_geometry(int_grid_cells) |>
+    st_cast("MULTIPOINT")
+  
+  max_diam = lapply(int_grid_cells_mpt, find_diam) |>
+    unlist() |>
+    max()
+  print(paste("Maximum diameter, d:", max_diam))
+
+  if(plot)
+  {
+    orthostr = paste("+proj=ortho +lat_0=", ortho_lat, " +lon_0=", ortho_long, sep = "")
+    plot(st_transform(st_geometry(int_grid_cells), orthostr), add = addplot, border = bordercolour, lwd = 0.5)
+    #plot(st_transform(st_geometry(feature), "+proj=ortho +lat_0=0 +lon_0=0"), pch = '.', add = T)
+  }
+
+  return(c(d_max = 1/max_diam, numcells = dim(int_grid_cells)[1]))
+}
+
+calc_fdim = function(resfrom, resto, f, plot = FALSE, addplot = FALSE, xran = NULL, yran = NULL, plotcol = "coral", ...)
+{
+  cellcov = as.list(resfrom:resto) |> sapply(dggs_coverage, f, ...) |> t() |> log10() |> as.data.frame()
+  print(cellcov)
+  bboxdim = lm(numcells ~ d_max, cellcov)
+  print(summary(bboxdim))
+  if(plot)
+  {
+    if(addplot == FALSE)
+    {
+      plot(cellcov, ylab = expression(log(N[delta])), xlab = expression(-log(delta)), xlim = xran, ylim = yran, col = plotcol)
+    } else
+    {
+      points(cellcov, col = plotcol)
+    }
+    abline(reg = bboxdim, col = plotcol, lty = 2)
+  }
+  
+  return(as.numeric(coef(bboxdim)[2]))
+}
+
+```
+
+### Helper Functions
+
+```{r}
+find_range = function(resfrom, resto, f, ...)
+{
+  cellcov = as.list(resfrom:resto) |> sapply(dggs_coverage, f, ...) |> t() |> log10() |> as.data.frame()
+  print(cellcov)
+  return(cellcov)
+}
+
+plot_range = function(cellcov, min_res = 1, max_res = nrow(cellcov), plot = TRUE, addplot = FALSE, xran = NULL, yran = NULL, plotcol = "coral", cex = 2)
+{
+  if(plot)
+  {
+    if(addplot == FALSE)
+    {
+      plot(cellcov, ylab = expression(log(N[delta])), xlab = expression(-log(delta)), xlim = xran, ylim = yran, col = plotcol, cex.lab = cex, cex.axis = cex, cex = cex)
+    } else
+    {
+      points(cellcov, col = plotcol, cex = cex)
+    }
+  }
+  
+  bboxdim = lm(numcells ~ d_max, cellcov[min_res:max_res, ])
+  print(summary(bboxdim))
+  print(resid(bboxdim))
+  if(plot)
+  {
+    points(cellcov[min_res:max_res, ], pch = 16, col = plotcol, cex = cex)
+    abline(reg = bboxdim, col = plotcol, lty = 2)
+  }
+  
+  serr = cellcov[min_res:max_res, "numcells"] |>
+    diff() |>
+    var() |>
+    sqrt()
+  
+  return(list(dimMB = as.numeric(coef(bboxdim)[2]), stderr = serr))
+}
+
+```
+
+## Generate spatial vector data of known fractal dimensions
+
+### Sierpinski Triangle
+
+```{r}
+#| fig-height: 12
+#| fig-width: 18
+#| dpi: 100
+# Methods to generate a Sierpiński triange
+new_points = function(points, last_point, last_vertex = NA)
+{
+  pt_row = sample(1:dim(points)[1], 1)
+  if(!is.na(last_vertex))
+  {
+    while(pt_row == last_vertex)
+      pt_row = sample(1:dim(points)[1], 1)
+  }
+  mid_pt = c((last_point[1] + points[pt_row, 1])/2, (last_point[2] + points[pt_row, 2])/2)
+  list(matrix(mid_pt, nrow = 1), pt_row)
+}
+
+# Define initial variables
+n = 3 #Create a 3-sided polygon (triangle)
+points = matrix(data = c(c(-30,0), c(0,60), c(30,0)), ncol = 2, byrow = TRUE, dimnames = list(LETTERS[1:n], c("x", "y"))) #Define vertices of triangle
+last_pt = matrix(data = c(0,0), nrow = 1) # Choose a random starting point
+max_pts = 200000
+
+# Generate coordinates
+sierpinski = list()
+length(sierpinski) = max_pts
+for(i in 1:max_pts)
+{
+  last_pt = new_points(points, last_pt)[[1]]
+  sierpinski[[i]] = last_pt
+}
+
+# Generate simple feature
+sierpinski_pts = matrix(unlist(sierpinski), ncol = 2, byrow = TRUE)
+sierpinski_sf = st_sf(st_sfc(st_multipoint(sierpinski_pts), crs = 4326))
+
+# Plot simple feature
+plot(st_transform(st_geometry(sierpinski_sf), "+proj=ortho +lat_0=30 +lon_0=-30"), pch = ".", axes = T, graticule = T)
+
+dggs_coverage(res = 3, feature = sierpinski_sf, plot = TRUE, ortho_long = -30)
+dggs_coverage(res = 6, feature = sierpinski_sf, plot = TRUE, DGGStopology = "HEXAGON", ortho_long = -30, bordercolour = "cornflowerblue")
+dggs_coverage(res = 4, feature = sierpinski_sf, plot = TRUE, DGGStopology = "HEXAGON", DGGSaperture = 3, ortho_long = -30, bordercolour = "violet")
+legend(x = "topright", inset = 0.03, legend = c("4T Resolution 3", "4H Resolution 6", "3H Resolution 4"), col = c("coral", "cornflowerblue", "violet"), lty = 1, title = "DGGS Type: ISEA-")
+title(main = "Sierpiński triangle", sub = "Coverings with DGGRID ISEA4T, ISEA4H and ISEA3H DGGSs")
+
+```
+
+### Koch Curve
+
+```{r}
+#| fig-height: 12
+#| fig-width: 18
+#| dpi: 100
+# Function to apply transformations to a sequence
+transform_sequence = function(sequence, transformations)
+{
+  paste0(sapply(strsplit(sequence, "")[[1]], function(c) {
+    ifelse(c %in% names(transformations), transformations[[c]], c)
+  }), collapse = "")
+}
+
+# Function to apply transformations iteratively
+transform_multiple = function(sequence, transformations, iterations)
+{
+  for (i in seq_len(iterations)) {
+    sequence = transform_sequence(sequence, transformations)
+  }
+  return(sequence)
+}
+
+# Function to convert turtle program to coordinates
+branching_turtle_to_coords = function(turtle_program, turn_amount = 45)
+{
+  saved_states = list()
+  state = c(0, 0, 0)
+  coords = matrix(c(0, 0), ncol = 2)
+  
+  for (command in strsplit(turtle_program, "")[[1]])
+  {
+    x = state[1]
+    y = state[2]
+    angle = state[3]
+    
+    if (tolower(command) %in% letters[1:10])
+    { 
+      # Move forward (matches a-j and A-J)
+      state[1] = x - cos(angle * pi / 180)
+      state[2] = y + sin(angle * pi / 180)
+      
+      if (command %in% letters[1:10])
+      { 
+        # Add break if command is lowercase
+        coords = rbind(coords, c(NA, NA))
+      }
+      
+      coords = rbind(coords, state[1:2])
+    } else if (command == "+")
+    { 
+      # Turn clockwise
+      state[3] = angle + turn_amount
+    } else if (command == "-")
+    { 
+      # Turn counterclockwise
+      state[3] = angle - turn_amount
+    } else if (command == "[")
+    { 
+      # Remember current state
+      saved_states = c(saved_states, list(state))
+    } else if (command == "]")
+    { 
+      # Return to previous state
+      state = saved_states[[length(saved_states)]]
+      saved_states = saved_states[-length(saved_states)]
+      coords = rbind(coords, c(NA, NA))
+      coords = rbind(coords, state[1:2])
+    }
+  }
+  
+  return(coords)
+}
+
+# Function to plot coordinates
+plot_coords = function(coords, bare_plot = FALSE)
+{
+  if (bare_plot)
+  {
+    plot(coords, type = "l", asp = 1, axes = FALSE, xlab = "", ylab = "")
+  } else
+  {
+    plot(coords, type = "l", asp = 1)
+  }
+}
+
+# Main function to generate and plot L-system
+l_plot = function(axiom, transformations, iterations = 0, angle = 45, plot = TRUE)
+{
+  turtle_program = transform_multiple(axiom, transformations, iterations)
+  coords = branching_turtle_to_coords(turtle_program, angle)
+  
+  if(plot)
+    plot_coords(coords, bare_plot = FALSE)
+  
+  return(coords)
+}
+
+
+axiom = "F"
+transformations = list(F = "F+F--F+F")
+iterations = 5
+angle = 60
+
+pts = l_plot(axiom, transformations, iterations, angle, plot = FALSE)/2
+koch_sf = st_sf(st_sfc(st_linestring(pts)), crs = "EPSG:4326")
+
+koch_transformed = st_transform(st_geometry(koch_sf), "+proj=ortho +lat_0=15 +lon_0=-80")
+plot(koch_transformed, axes = T, graticule = T)
+
+dggs_coverage(res = 3, feature = koch_sf, plot = TRUE, ortho_lat = 15, ortho_long = -80)
+dggs_coverage(res = 7, feature = koch_sf, plot = TRUE, DGGStopology = "HEXAGON", ortho_lat = 15, ortho_long = -80, bordercolour = "cornflowerblue")
+dggs_coverage(res = 4, feature = koch_sf, plot = TRUE, DGGStopology = "HEXAGON", DGGSaperture = 3, ortho_lat = 15, ortho_long = -80, bordercolour = "violet")
+legend(x = "topleft", inset = 0.03, legend = c("4T Resolution 3", "4H Resolution 7", "3H Resolution 4"), col = c("coral", "cornflowerblue", "violet"), lty = 1, title = "DGGS Type: ISEA-")
+title(main = "Koch curve", sub = "Coverings with DGGRID ISEA4T, ISEA4H and ISEA3H DGGSs")
+
+```
+
+## Calculate Minkowski-Bouligand dimension of sets with known fractal dimensions
+
+### Sierpinski Triangle
+
+```{r}
+#| dpi: 100
+#| fig-height: 12
+#| fig-width: 18
+i4t_sierp = find_range(0, 9, sierpinski_sf)
+i4h_sierp = find_range(0, 10, sierpinski_sf, DGGStopology = "HEXAGON")
+i3h_sierp = find_range(0, 12, sierpinski_sf, DGGStopology = "HEXAGON", DGGSaperture = 3)
+```
+
+```{r}
+#| dpi: 100
+#| fig-height: 12
+#| fig-width: 18
+
+par(mar = c(5.1, 5.5, 4.1, 2.1)) # Comment for separate plots
+
+# par(mfrow = c(1, 2), cex = 0.75) # Uncomment for side-by-side plots
+plot_range(i4t_sierp, 2, 9, xran = c(-6.9, -3.85), yran = c(0.6, 4.52))
+plot_range(i4h_sierp, 3, 9, plotcol = "cornflowerblue", addplot = TRUE)
+plot_range(i3h_sierp, 3, 12, plotcol = "violet", addplot = TRUE)
+abline(mean(c(11.4069, 11.11185, 11.16595)+0.25), log(3)/log(2))
+title("Minkowski-Bouligand dimension of the Sierpiński triangle", cex.main = 2)
+legend(x = "topleft", inset = 0.01, legend = c(expression(ISEA4T: 1.595), expression(ISEA4H: 1.561), expression(ISEA3H: 1.575), expression(Theoretical~dimension: 1.584), "Excluded data-point"), col = c("coral", "cornflowerblue", "violet", "black", "black"), lty = c(2, 2, 2, 1, NA), pch = c(16, 16, 16, NA, 1), box.lty = 0, cex = 2)
+
+# Uncomment for side-by-side plots
+# plot_range(i4t_koch, 3, 6, xran = c(-6.9, -4.2), yran = c(0.6, 3.75))
+# plot_range(i4h_koch, 2, 7, plotcol = "cornflowerblue", addplot = TRUE)
+# plot_range(i3h_koch, 4, 8, plotcol = "violet", addplot = TRUE)
+# abline(mean(c(9.36652, 9.14352, 9.24041)+0.25), log(4)/log(3))
+# title("Koch curve", cex.main = 2)
+# legend(x = "topleft", inset = 0.03, legend = c(expression(ISEA4T: 1.299), expression(ISEA4H: 1.244), expression(ISEA3H: 1.265), expression(Theoretical~dimension: 1.261), "Excluded data-point"), col = c("coral", "cornflowerblue", "violet", "black", "black"), lty = c(2, 2, 2, 1, NA), pch = c(16, 16, 16, NA, 1), box.lty = 0, cex = 2)
+# par(mfrow = c(1,1), cex = 1)
+
+par(mar = c(5.1, 4.1, 4.1, 2.1))
+
+```
+
+### Koch Curve
+
+```{r}
+#| dpi: 100
+#| fig-height: 12
+#| fig-width: 18
+
+i4t_koch = find_range(0, 9, koch_sf)
+i4h_koch = find_range(0, 9, koch_sf, DGGStopology = "HEXAGON")
+i3h_koch = find_range(0, 11, koch_sf, DGGStopology = "HEXAGON", DGGSaperture = 3)
+```
+
+```{r}
+#| dpi: 100
+#| fig-height: 12
+#| fig-width: 18
+# Comment out the following lines for side-by-side plots
+par(mar = c(5.1, 5.5, 4.1, 2.1))
+plot_range(i4t_koch, 3, 6, xran = c(-6.9, -4.2), yran = c(0.6, 3.75))
+plot_range(i4h_koch, 2, 7, plotcol = "cornflowerblue", addplot = TRUE)
+plot_range(i3h_koch, 4, 8, plotcol = "violet", addplot = TRUE)
+abline(mean(c(9.36652, 9.14352, 9.24041)+0.25), log(4)/log(3))
+title("Minkowski-Bouligand dimension of the Koch curve", cex.main = 2)
+legend(x = "topleft", inset = 0.03, legend = c(expression(ISEA4T: 1.299), expression(ISEA4H: 1.244), expression(ISEA3H: 1.265), expression(Theoretical~dimension: 1.261), "Excluded data-point"), col = c("coral", "cornflowerblue", "violet", "black", "black"), lty = c(2, 2, 2, 1, NA), pch = c(16, 16, 16, NA, 1), box.lty = 0, cex = 2)
+par(mar = c(5.1, 4.1, 4.1, 2.1))
+
+```
+
+## Case Study on Opaque Cloud Field
+
+### Download tailored product using EUMDAC
+
+```{r}
+eumdac_cmd = "eumdac download -p W_XX-EUMETSAT-Darmstadt,IMG+SAT,MTI1+FCI-2-CLM--FD--x-x---x_C_EUMT_20250315121703_L2PF_OPE_20250315120000_20250315121000_N__C_0073_0000 -c EO:EUM:DAT:0678 --tailor clouds/chain.yml -o clouds/"
+# system(eumdac_cmd)
+```
+
+### Prepare cloud vector
+
+```{r}
+library(terra)
+library(rnaturalearth)
+
+clm_file = list.files(path = "clouds", pattern = "^FCIL2CLM_.*.tif$", full.names = TRUE)
+
+subset_clm = rast(clm_file)
+opaque_clouds = subset_clm == 3
+cloud_poly = as.polygons(opaque_clouds, round = FALSE, aggregate = TRUE) |>
+  st_as_sf()
+
+cloud_sf = cloud_poly[cloud_poly$`Cloud Mask` == 1,] |>
+  st_cast("POLYGON")
+
+projstr = "+proj=ortho +lat_0=0 +lon_0=0"
+countries = ne_countries(scale = "medium") |>
+  st_geometry() |>
+  st_transform(projstr)
+```
+
+#### Plot cloud field on the globe
+
+```{r}
+#| fig-height: 12
+#| fig-width: 18
+#| dpi: 100
+
+plot(countries, col = "seagreen2", border = NA, axes = T, xlim = c(-4e+06, 4e+06), ylim = c(-1.5e+06, 1.5e+06), graticule = T, cex.lab = 2, cex.axis = 2)
+plot(st_transform(cloud_sf, projstr), col = "deepskyblue", add = T, border = NA)
+
+dggs_coverage(res = 5, feature = cloud_sf, plot = TRUE, ortho_lat = 0, ortho_long = 0)
+dggs_coverage(res = 5, feature = cloud_sf, plot = TRUE, DGGStopology = "HEXAGON", ortho_lat = 0, ortho_long = 0, bordercolour = "cornflowerblue")
+dggs_coverage(res = 6, feature = cloud_sf, plot = TRUE, DGGStopology = "HEXAGON", DGGSaperture = 3, ortho_lat = 0, ortho_long = 0, bordercolour = "violet")
+legend(x = "topright", inset = 0.01, legend = c("4T Resolution 5", "4H Resolution 5", "3H Resolution 6", "Clouds"), col = c("coral", "cornflowerblue", "violet", NA), fill = c(NA, NA, NA, "deepskyblue"), lty = c(1, 1, 1, NA), border = NA, title = "DGGS Type: ISEA-", cex = 2)
+title(main = "Opaque clouds", sub = "Coverings with DGGRID ISEA4T, ISEA4H and ISEA3H DGGSs", cex.main = 2, cex.sub = 2)
+
+```
+
+### Calculate Minkowski-Bouligand Dimension
+
+```{r}
+#| fig-height: 12
+#| fig-width: 18
+#| dpi: 100
+
+i4t = find_range(0, 9, cloud_sf)
+i4h = find_range(0, 10, cloud_sf, DGGStopology = "HEXAGON")
+i3h = find_range(0, 13, cloud_sf, DGGStopology = "HEXAGON", DGGSaperture = 3)
+```
+
+```{r}
+#| fig-height: 12
+#| fig-width: 18
+#| dpi: 100
+
+par(mar = c(5.1, 5.5, 4.1, 2.1))
+plot_range(i4t, 5, 9, xran = c(-6.9, -3.89), yran = c(0.69, 4.9))
+plot_range(i4h, 5, 10, addplot = T, plotcol = "cornflowerblue")
+plot_range(i3h, 5, 13, addplot = T, plotcol = "violet")
+
+title("Minkowski-Bouligand dimension of the Opaque clouds", cex.main = 2)
+legend(x = "topleft", inset = 0.03, legend = c(expression(ISEA4T: 1.584), expression(ISEA4H: 1.578), expression(ISEA3H: 1.571), "Excluded data-point"), col = c("coral", "cornflowerblue", "violet", "black"), lty = c(2, 2, 2, NA), pch = c(16, 16, 16, 1), box.lty = 0, cex = 2)
+par(mar = c(5.1, 4.1, 4.1, 2.1))
+```

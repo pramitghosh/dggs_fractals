@@ -1,0 +1,12 @@
+product: FCIL2CLM
+format: geotiff
+filter:
+  bands:
+  - cloud_state
+projection: geographic
+roi:
+  NSWE:
+  - 23
+  - -23
+  - -40
+  - 40
