@@ -31,4 +31,9 @@ Additionally, the following package available from Github needs to be installed.
 ## Execution
 The Quarto markdown can be rendered to a HTML page among other formats using several means such as the `quarto render` command ([more details here](https://quarto.org/docs/computations/r.html#rendering)).
 > [!NOTE]
-> Computation of the entire analysis and subsequent rendering takes significant amount of time (~5 hours on 12th Generation Intel Core i7 series processor with 20 cores and 32GB of main memory).
+> Computation of the entire analysis and subsequent rendering takes significant amount of time (~3 hours on 12th Generation Intel Core i7 series processor with 20 cores and 32GB of main memory running on Ubuntu 25.04).
+
+## Results
+Results described in the manuscript are available as output of the analysis. Figures presented in the manuscript are also generated.
+> [!NOTE]
+> Given the nature of the computation and available precision, some results vary negligibly ($`\sim10^{-3}`$) over reach run. However, this does not affect the inference and conclusions drawn from this analysis.
